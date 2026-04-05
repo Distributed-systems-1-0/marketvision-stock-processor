@@ -1,49 +1,33 @@
-// src/routes/orchestratorRoutes.js
 const express = require('express');
 const router = express.Router();
-const { getCurrentMetrics, activeWorkers, scaleUp, scaleDown } = require('../services/orchestratorService');
+const workerManager = require('../services/workerManagerService');
 
-// GET /api/metrics - For dashboard to show system health
-router.get('/metrics', async (req, res) => {
-    try {
-        const metrics = await getCurrentMetrics();
-        res.json({
-            success: true,
-            data: {
-                ...metrics,
-                workers: activeWorkers.map(w => ({
-                    id: w.id,
-                    startedAt: w.startedAt,
-                    status: 'running'
-                }))
-            }
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+// POST /api/orchestrator/spawn
+router.post('/spawn', async (req, res) => {
+    const { workerId } = req.body;
+    const worker = await workerManager.spawnWorker(workerId || `worker-${Date.now()}`);
+    
+    if (worker) {
+        res.status(201).json({ message: 'Worker spawned successfully', worker });
+    } else {
+        res.status(500).json({ error: 'Failed to spawn worker' });
     }
 });
 
-// GET /api/workers - List all active workers
+// GET /api/orchestrator/workers
 router.get('/workers', (req, res) => {
-    res.json({
-        success: true,
-        count: activeWorkers.length,
-        workers: activeWorkers
-    });
+    const workers = workerManager.getAllWorkers();
+    res.json(workers);
 });
 
-// POST /api/scale/up - Manual scale up (for testing)
-router.post('/scale/up', async (req, res) => {
-    const count = req.body.count || 1;
-    const result = await scaleUp(count);
-    res.json({ success: result, message: result ? 'Scale up initiated' : 'Scale up failed' });
-});
-
-// POST /api/scale/down - Manual scale down (for testing)
-router.post('/scale/down', async (req, res) => {
-    const count = req.body.count || 1;
-    const result = await scaleDown(count);
-    res.json({ success: result, message: result ? 'Scale down initiated' : 'Scale down failed' });
+// DELETE /api/orchestrator/kill/:id
+router.delete('/kill/:id', async (req, res) => {
+    const success = await workerManager.killWorker(req.params.id);
+    if (success) {
+        res.json({ message: `Worker ${req.params.id} terminated` });
+    } else {
+        res.status(404).json({ error: 'Worker not found' });
+    }
 });
 
 module.exports = router;
