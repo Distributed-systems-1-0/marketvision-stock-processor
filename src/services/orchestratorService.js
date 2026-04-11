@@ -8,7 +8,10 @@ const SCALE_UP_THRESHOLD = parseInt(process.env.SCALE_UP_THRESHOLD) || 70;
 const SCALE_DOWN_THRESHOLD = parseInt(process.env.SCALE_DOWN_THRESHOLD) || 30;
 const AI_API_URL = process.env.AI_PREDICTION_API;
 
-// Track status
+// Phase 5 Refinement: Cooldown & History
+let lastScaleTime = Date.now();
+const COOLDOWN_MS = 30000; // 30 seconds between scaling actions
+let scalingHistory = []; // Data for Bakang's Dashboard (Phase 6)
 let scalingInProgress = false;
 
 async function getCurrentMetrics() {
@@ -19,16 +22,16 @@ async function getCurrentMetrics() {
         return {
             queueDepth: kafkaResponse.data.queueDepth,
             activeWorkerCount: workerManager.getAllWorkers().length,
-            avgCpuPercentage: 0, 
+            avgCpuPercentage: kafkaResponse.data.cpuUsage || 0, 
             tickRate: kafkaResponse.data.tickRatePerSecond || 0,
             timestamp: new Date().toISOString()
         };
     } catch (error) {
         console.log("⚠️ Kafka Service (Senatla) not found. Using internal mock data...");
         return {
-            queueDepth: 500, // Triggering high load for testing
+            queueDepth: 500,
             activeWorkerCount: workerManager.getAllWorkers().length,
-            avgCpuPercentage: 45,
+            avgCpuPercentage: 45.5,
             tickRate: 150,
             timestamp: new Date().toISOString()
         };
@@ -38,29 +41,29 @@ async function getCurrentMetrics() {
 async function getAIPrediction(metrics) {
     try {
         const response = await axios.post(AI_API_URL, {
+            timestamp: metrics.timestamp,
             queue_depth: metrics.queueDepth,
-            worker_count: metrics.activeWorkerCount,
-            avg_cpu: metrics.avgCpuPercentage,
             tick_rate: metrics.tickRate,
-            timestamp: metrics.timestamp
+            worker_count: metrics.activeWorkerCount,
+            avg_worker_cpu: metrics.avgCpuPercentage 
         });
         
         return {
-            predictedLoad: response.data.predictedLoad,
-            confidence: response.data.confidence
+            predictedLoad: response.data.predicted_load || response.data.predictedLoad,
+            confidence: response.data.confidence || 1.0,
+            suggestedWorkers: response.data.suggested_workers
         };
     } catch (error) {
         console.error('AI prediction failed:', error.message);
-        // Fallback calculation: (Current Queue / 1000) * 100
         const fallbackLoad = Math.min(100, (metrics.queueDepth / 1000) * 100);
-        return { predictedLoad: fallbackLoad, confidence: 0.5 };
+        return { predictedLoad: fallbackLoad, confidence: 0.5, suggestedWorkers: null };
     }
 }
 
 async function scaleUp(count = 1) {
     if (scalingInProgress) return false;
-    
     const currentWorkers = workerManager.getAllWorkers();
+    
     if (currentWorkers.length + count > MAX_WORKERS) {
         console.log(`Cannot scale up: MAX_WORKERS reached.`);
         return false;
@@ -71,19 +74,21 @@ async function scaleUp(count = 1) {
     
     for (let i = 0; i < count; i++) {
         const workerId = `worker-${Date.now()}-${i}`;
-        const worker = await workerManager.spawnWorker(workerId);
-        if (!worker) console.error(`Failed to start ${workerId}`);
+        await workerManager.spawnWorker(workerId);
     }
     
-    await logScalingEvent('SCALE_UP', count, workerManager.getAllWorkers().length);
+    const event = await logScalingEvent('SCALE_UP', count, workerManager.getAllWorkers().length);
+    scalingHistory.push(event);
+    
+    lastScaleTime = Date.now(); // Reset cooldown
     scalingInProgress = false;
     return true;
 }
 
 async function scaleDown(count = 1) {
     if (scalingInProgress) return false;
-    
     const currentWorkers = workerManager.getAllWorkers();
+    
     if (currentWorkers.length - count < MIN_WORKERS) {
         console.log(`Cannot scale down: MIN_WORKERS required.`);
         return false;
@@ -97,56 +102,70 @@ async function scaleDown(count = 1) {
         await workerManager.killWorker(worker.id);
     }
     
-    await logScalingEvent('SCALE_DOWN', count, workerManager.getAllWorkers().length);
+    const event = await logScalingEvent('SCALE_DOWN', count, workerManager.getAllWorkers().length);
+    scalingHistory.push(event);
+    
+    lastScaleTime = Date.now(); // Reset cooldown
     scalingInProgress = false;
     return true;
 }
 
 async function logScalingEvent(action, count, newTotal) {
-    const event = {
+    return {
         id: `${Date.now()}`,
-        action: action,
+        action,
         workerCount: count,
-        newTotal: newTotal,
+        newTotal,
         timestamp: new Date().toISOString(),
-        reason: `Load logic triggered ${action}`
+        reason: `AI optimized workload management`
     };
-    console.log('📊 Scaling event logged:', event);
-    return event;
+}
+
+// Added for Phase 6 Dashboard Integration
+function getScalingHistory() {
+    return scalingHistory;
 }
 
 async function orchestrationLoop() {
     const interval = parseInt(process.env.CHECK_INTERVAL_MS) || 10000;
-    console.log(`🔄 Orchestration loop started. Checking every ${interval} ms`);
+    console.log(`🔄 Loop active. Cooldown set to ${COOLDOWN_MS / 1000}s.`);
     
     setInterval(async () => {
         try {
             const metrics = await getCurrentMetrics();
-            console.log('📊 Metrics:', metrics);
-            
             const prediction = await getAIPrediction(metrics);
-            console.log('🤖 AI Prediction:', prediction);
-            
             const activeCount = workerManager.getAllWorkers().length;
 
-            if (prediction.predictedLoad > SCALE_UP_THRESHOLD && activeCount < MAX_WORKERS) {
-                await scaleUp(1);
+            console.log(`📊 [${new Date().toLocaleTimeString()}] Load: ${prediction.predictedLoad}% | Workers: ${activeCount}`);
+            
+            // Step 6.2: Check Cooldown
+            const timeSinceLastScale = Date.now() - lastScaleTime;
+            const isScaleNeeded = (prediction.suggestedWorkers > activeCount || prediction.predictedLoad > SCALE_UP_THRESHOLD) ||
+                                (prediction.suggestedWorkers < activeCount || prediction.predictedLoad < SCALE_DOWN_THRESHOLD);
+
+            if (isScaleNeeded && timeSinceLastScale < COOLDOWN_MS) {
+                console.log(`⏳ Scaling postponed: Cooldown active (${Math.round((COOLDOWN_MS - timeSinceLastScale)/1000)}s left)`);
+                return;
+            }
+
+            // Scaling Decisions
+            if ((prediction.suggestedWorkers > activeCount || prediction.predictedLoad > SCALE_UP_THRESHOLD) && activeCount < MAX_WORKERS) {
+                // Step 6.1: Proportional Scaling
+                let workersToAdd = 1;
+                if (prediction.predictedLoad > 90) workersToAdd = 2; 
+                await scaleUp(workersToAdd);
             } 
-            else if (prediction.predictedLoad < SCALE_DOWN_THRESHOLD && activeCount > MIN_WORKERS) {
+            else if ((prediction.suggestedWorkers < activeCount || prediction.predictedLoad < SCALE_DOWN_THRESHOLD) && activeCount > MIN_WORKERS) {
                 await scaleDown(1);
             }
-            else {
-                console.log(`✅ Load ${prediction.predictedLoad}% stable. No scaling needed.`);
-            }
         } catch (error) {
-            console.error('❌ Orchestration loop error:', error.message);
+            console.error('❌ Loop error:', error.message);
         }
     }, interval);
 }
 
 module.exports = {
     orchestrationLoop,
-    getCurrentMetrics,
-    scaleUp,
-    scaleDown
+    getScalingHistory,
+    getCurrentMetrics
 };
