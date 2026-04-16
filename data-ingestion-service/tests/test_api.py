@@ -14,9 +14,9 @@ def test_health_check():
 def test_ingest_valid_data():
     headers = {"X-API-Key": Config.API_KEY}
     data = {
-        "client_id": "test_client",
-        "stream_type": "iot",
-        "payload": {"temp": 25}
+        "symbol": "AAPL",
+        "price": 175.5,
+        "volume": 1000
     }
     response = client.post("/ingest", json=data, headers=headers)
     assert response.status_code == 201
@@ -26,9 +26,9 @@ def test_ingest_valid_data():
 def test_ingest_invalid_api_key():
     headers = {"X-API-Key": "wrong-key"}
     data = {
-        "client_id": "test_client",
-        "stream_type": "iot",
-        "payload": {"temp": 25}
+        "symbol": "AAPL",
+        "price": 175.5,
+        "volume": 1000
     }
     response = client.post("/ingest", json=data, headers=headers)
     assert response.status_code == 401
@@ -37,16 +37,17 @@ def test_ingest_invalid_api_key():
 def test_ingest_invalid_data():
     headers = {"X-API-Key": Config.API_KEY}
     data = {
-        "client_id": "",
-        "stream_type": "invalid_type",
-        "payload": {}
+        "symbol": "",
+        "price": -1,
+        "volume": -3
     }
     response = client.post("/ingest", json=data, headers=headers)
     assert response.status_code == 422
 
 
 def test_metrics_endpoint():
-    headers = {"X-API-Key": Config.API_KEY}
-    response = client.get("/metrics", headers=headers)
+    response = client.get("/metrics")
     assert response.status_code == 200
     assert "total_messages" in response.json()
+    assert "queueDepth" in response.json()
+    assert "tickRatePerSecond" in response.json()

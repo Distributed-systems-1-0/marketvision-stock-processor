@@ -236,14 +236,11 @@ function App() {
     const fresh = (value) => now - value < 20000;
     return {
       kafka: fresh(serviceHeartbeat.kafka) ? "online" : "offline",
-      workers:
-        fresh(serviceHeartbeat.workers) && toNumber(metrics.worker_count, 0) > 0
-          ? "online"
-          : "warning",
+      workers: ticks.length > 0 || fresh(serviceHeartbeat.workers) ? "online" : "warning",
       ai: fresh(serviceHeartbeat.ai) ? "online" : "warning",
-      firebase: !error && fresh(serviceHeartbeat.firebase) ? "online" : "warning",
+      firebase: !error && (ticks.length > 0 || fresh(serviceHeartbeat.firebase)) ? "online" : "warning",
     };
-  }, [error, metrics.worker_count, serviceHeartbeat]);
+  }, [error, serviceHeartbeat, ticks.length]);
 
   const mergedTimeline = useMemo(() => {
     const fromScaling = scalingEvents.map((event, index) => {
@@ -334,6 +331,7 @@ function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "x-api-key": "test-api-key-123",
         },
         body: JSON.stringify(tick),
       });
@@ -342,26 +340,51 @@ function App() {
     }
   }
 
-  function startLoadTest() {
-    if (demoTimerRef.current) {
-      return;
+  async function startLoadTest() {
+    try {
+      const response = await fetch("http://localhost:8000/api/load-test/start", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          rate: 100,
+          symbols: ["AAPL", "GOLD", "TSLA"],
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Load test start failed (${response.status})`);
+      }
+
+      const payload = await response.json();
+      setDemoLoadRunning(true);
+      appendDecisionEvent(
+        "INFO",
+        `Load test started at ${payload.rate || 100} ticks/sec`,
+      );
+    } catch (loadError) {
+      pushAlert("WARNING", "Unable to start load test on localhost:8000");
+      appendDecisionEvent("WARNING", `Load test start failed: ${loadError.message}`);
     }
-
-    setDemoLoadRunning(true);
-    appendDecisionEvent("INFO", "Demo load test started");
-
-    demoTimerRef.current = window.setInterval(() => {
-      sendTick(makeDemoTick());
-    }, 1200);
   }
 
-  function stopLoadTest() {
+  async function stopLoadTest() {
+    try {
+      await fetch("http://localhost:8000/api/load-test/stop", {
+        method: "POST",
+      });
+    } catch {
+      // Ignore stop errors and still reset UI state.
+    }
+
     if (demoTimerRef.current) {
       clearInterval(demoTimerRef.current);
       demoTimerRef.current = null;
     }
+
     setDemoLoadRunning(false);
-    appendDecisionEvent("INFO", "Demo load test stopped");
+    appendDecisionEvent("INFO", "Load test stopped");
   }
 
   function simulateSpike() {
@@ -413,6 +436,7 @@ function App() {
         setServiceHeartbeat((prev) => ({
           ...prev,
           firebase: Date.now(),
+          workers: Date.now(),
         }));
       },
       (snapshotError) => {
@@ -485,10 +509,76 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const refreshHealth = async () => {
+      const endpoints = [
+        { key: "kafka", url: "http://localhost:8000/health" },
+        { key: "ai", url: "http://localhost:8001/health" },
+      ];
+
+      await Promise.all(
+        endpoints.map(async ({ key, url }) => {
+          try {
+            const response = await fetch(url, { cache: "no-store" });
+            if (!cancelled && response.ok) {
+              setServiceHeartbeat((prev) => ({
+                ...prev,
+                [key]: Date.now(),
+              }));
+            }
+          } catch {
+            // Keep the last known good state so transient network blips do not
+            // immediately flip the badge offline.
+          }
+        }),
+      );
+    };
+
+    refreshHealth();
+    const intervalId = setInterval(refreshHealth, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (demoTimerRef.current) {
         clearInterval(demoTimerRef.current);
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshLoadTestStatus = async () => {
+      try {
+        const response = await fetch("http://localhost:8000/api/load-test/status", {
+          cache: "no-store",
+        });
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const payload = await response.json();
+        if (!cancelled) {
+          setDemoLoadRunning(Boolean(payload.running));
+        }
+      } catch {
+        // Keep current UI state if status endpoint is temporarily unreachable.
+      }
+    };
+
+    refreshLoadTestStatus();
+    const intervalId = setInterval(refreshLoadTestStatus, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
     };
   }, []);
 

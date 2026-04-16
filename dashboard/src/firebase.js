@@ -6,6 +6,7 @@ const firebaseConfig = {
   apiKey: "AIzaSyBgwZjNZPufUnIGh9Lg1ox6jblytBZBIjA",
   authDomain: "marketvision-stock-processor.firebaseapp.com",
   projectId: "marketvision-stock-processor",
+  databaseURL: "https://marketvision-stock-processor-default-rtdb.firebaseio.com",
   storageBucket: "marketvision-stock-processor.firebasestorage.app",
   messagingSenderId: "848318856194",
   appId: "1:848318856194:web:14efaff379392fe6d7bb1b",

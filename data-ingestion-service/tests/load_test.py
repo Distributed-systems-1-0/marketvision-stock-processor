@@ -8,14 +8,12 @@ API_URL = f"http://localhost:{Config.API_PORT}/ingest"
 API_KEY = Config.API_KEY
 
 async def send_message(session, client_id, msg_num):
+    symbols = ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"]
     data = {
-        "client_id": client_id,
-        "stream_type": random.choice(["social_media", "iot", "financial"]),
-        "payload": {
-            "value": msg_num,
-            "timestamp": datetime.utcnow().isoformat(),
-            "random_data": random.randint(1, 1000)
-        }
+        "symbol": random.choice(symbols),
+        "price": round(random.uniform(100, 500), 2),
+        "volume": random.randint(10, 10000),
+        "timestamp": datetime.utcnow().isoformat()
     }
     headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
     async with session.post(API_URL, json=data, headers=headers) as resp:

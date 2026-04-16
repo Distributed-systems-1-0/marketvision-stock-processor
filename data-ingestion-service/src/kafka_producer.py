@@ -18,9 +18,7 @@ class KafkaProducerWrapper:
         self.producer = AIOKafkaProducer(
             bootstrap_servers=Config.KAFKA_BOOTSTRAP_SERVERS,
             value_serializer=lambda v: json.dumps(v, default=str).encode('utf-8'),
-            acks='all',  # Wait for all replicas to acknowledge
-            retries=Config.MAX_RETRIES,
-            max_in_flight_requests_per_connection=5
+            acks='all'  # Wait for all replicas to acknowledge
         )
         await self.producer.start()
         self.connected = True
