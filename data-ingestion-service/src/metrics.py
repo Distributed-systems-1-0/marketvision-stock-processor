@@ -20,9 +20,19 @@ class IngestionMetrics:
         return sum(1 for ts in self.message_timestamps if ts > cutoff)
     
     def get_messages_per_second(self):
-        """Calculate average messages per second over last minute"""
-        count = self.get_messages_last_minute()
-        return count / 60.0
+        """Calculate a realistic recent messages/sec rate."""
+        if not self.message_timestamps:
+            return 0.0
+
+        current_time = time.time()
+        cutoff = current_time - 60
+        recent_timestamps = [ts for ts in self.message_timestamps if ts > cutoff]
+        if not recent_timestamps:
+            return 0.0
+
+        oldest_recent = min(recent_timestamps)
+        window_seconds = max(current_time - oldest_recent, 1.0)
+        return len(recent_timestamps) / window_seconds
     
     def get_uptime_seconds(self):
         """Get service uptime"""

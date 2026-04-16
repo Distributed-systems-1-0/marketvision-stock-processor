@@ -1,112 +1,175 @@
 const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
 const csv = require('csv-parser');
-const { Kafka } = require('kafkajs');
 
-// CONFIGURATION
 const args = process.argv.slice(2);
-const CSV_FILE = args[0] || './data/AAPL.csv';  // Path to your CSV file
-const SYMBOL = args[1] || 'STOCK';  // Stock symbol
-const KAFKA_BROKER = args[2] || 'localhost:9092';  // Kafka broker
-const DELAY_MS = args[3] || 100;  // Wait 100ms between ticks (10 ticks per second)
-const KAFKA_TOPIC = 'stock-ticks';  // Topic name
+const INPUT_PATH = args[0] || './data';
+const API_URL = args[1] || process.env.INGEST_API_URL || 'http://localhost:8000/ingest';
+const API_KEY = args[2] || process.env.API_KEY || 'test-api-key-123';
+const DELAY_MS = Number(args[3] || 100);
 
-// Check if file exists
-if (!fs.existsSync(CSV_FILE)) {
-  console.error(`❌ Error: File not found: ${CSV_FILE}`);
-  console.error(`\nUsage: node simulate-ticks.js <csv_file> [symbol] [kafka_broker] [delay_ms]`);
-  console.error(`Example: node simulate-ticks.js "c:\\Users\\schek\\Downloads\\Apple.csv" AAPL localhost:9092 100`);
+if (args.includes('--help') || args.includes('-h')) {
+  console.log('Usage: node simulate-ticks.js [input_path] [api_url] [api_key] [delay_ms]');
+  console.log('Examples:');
+  console.log('  node simulate-ticks.js');
+  console.log('  node simulate-ticks.js ./data http://localhost:8000/ingest test-api-key-123 100');
+  process.exit(0);
+}
+
+if (!fs.existsSync(INPUT_PATH)) {
+  console.error(`Error: path not found: ${INPUT_PATH}`);
   process.exit(1);
 }
 
-console.log(`📊 Starting CSV playback to Kafka...`);
-console.log(`   File: ${CSV_FILE}`);
-console.log(`   Symbol: ${SYMBOL}`);
-console.log(`   Kafka Broker: ${KAFKA_BROKER}`);
-console.log(`   Topic: ${KAFKA_TOPIC}`);
-console.log(`   Delay: ${DELAY_MS}ms between ticks\n`);
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-// Initialize Kafka producer
-const kafka = new Kafka({
-  clientId: 'stock-simulator',
-  brokers: [KAFKA_BROKER]
-});
+function parsePrice(row) {
+  return (
+    Number.parseFloat(row.Close) ||
+    Number.parseFloat(row.close) ||
+    Number.parseFloat(row.Price) ||
+    Number.parseFloat(row.price) ||
+    Number.parseFloat(row.Last) ||
+    Number.parseFloat(row.last) ||
+    0
+  );
+}
 
-const producer = kafka.producer();
+function parseVolume(row) {
+  return (
+    Number.parseInt(row.Volume, 10) ||
+    Number.parseInt(row.volume, 10) ||
+    Number.parseInt(row.Qty, 10) ||
+    Number.parseInt(row.qty, 10) ||
+    1000
+  );
+}
 
-let rowCount = 0;
-let successCount = 0;
-let errorCount = 0;
+function parseTimestamp(row) {
+  return (
+    row.Date ||
+    row.date ||
+    row.Timestamp ||
+    row.timestamp ||
+    row.Datetime ||
+    row.datetime ||
+    new Date().toISOString()
+  );
+}
 
-// Start producer and read CSV
-(async () => {
-  try {
-    await producer.connect();
-    console.log(`✅ Connected to Kafka broker: ${KAFKA_BROKER}\n`);
+function getCsvFiles(inputPath) {
+  const stat = fs.statSync(inputPath);
+  if (stat.isFile()) {
+    return [inputPath];
+  }
 
-    // Read CSV and send each row as a tick
-    const stream = fs.createReadStream(CSV_FILE)
+  return fs
+    .readdirSync(inputPath)
+    .filter((name) => name.toLowerCase().endsWith('.csv'))
+    .sort((left, right) => left.localeCompare(right))
+    .map((name) => path.join(inputPath, name));
+}
+
+function symbolFromFilename(filePath) {
+  const baseName = path.basename(filePath, path.extname(filePath)).toLowerCase();
+
+  if (baseName.includes('botswana diamonds')) return 'BOD';
+  if (baseName.includes('engen botswana')) return 'ENGBW';
+  if (baseName.includes('first national bank botswana')) return 'FNBB';
+  if (baseName.includes('gold')) return 'GOLD';
+  if (baseName.includes('apple')) return 'AAPL';
+
+  return path.basename(filePath, path.extname(filePath)).toUpperCase();
+}
+
+async function loadRows(filePath) {
+  return new Promise((resolve, reject) => {
+    const rows = [];
+    fs.createReadStream(filePath)
       .pipe(csv())
-      .on('data', async (row) => {
-        stream.pause();  // Pause stream to control flow
-        rowCount++;
-        
-        // Map CSV columns to your tick format
-        // Supports common column names: Date/date/timestamp, Close/close/price, Volume/volume
-        const tick = {
-          symbol: SYMBOL,
-          price: parseFloat(row.Close) || parseFloat(row.close) || parseFloat(row.Price) || parseFloat(row.price) || 0,
-          volume: parseInt(row.Volume) || parseInt(row.volume) || 1000,
-          timestamp: row.Date || row.date || row.Timestamp || row.timestamp || new Date().toISOString()
-        };
-        
-        // Validate tick data
-        if (!tick.price || tick.price === 0) {
-          console.warn(`⚠️  Row ${rowCount}: Skipped (no price data)`);
-          stream.resume();
-          return;
-        }
+      .on('data', (row) => rows.push(row))
+      .on('end', () => resolve(rows))
+      .on('error', reject);
+  });
+}
 
-        try {
-          await producer.send({
-            topic: KAFKA_TOPIC,
-            messages: [
-              {
-                key: tick.symbol,
-                value: JSON.stringify(tick),
-                timestamp: Date.now().toString()
-              }
-            ]
-          });
-          successCount++;
-          if (successCount % 10 === 0) {
-            console.log(`✅ Sent ${successCount} ticks: ${tick.symbol} @ $${tick.price.toFixed(2)} | Volume: ${tick.volume}`);
-          }
-        } catch (error) {
-          errorCount++;
-          console.error(`❌ Row ${rowCount} Failed: ${error.message}`);
-        }
-        
-        // Wait before sending next tick
-        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-        stream.resume();
-      })
-      .on('end', async () => {
-        console.log(`\n📊 CSV playback complete!`);
-        console.log(`   Total rows: ${rowCount}`);
-        console.log(`   Successful: ${successCount}`);
-        console.log(`   Errors: ${errorCount}`);
-        
-        await producer.disconnect();
-        console.log(`\n✅ Disconnected from Kafka`);
-        process.exit(0);
-      })
-      .on('error', (error) => {
-        console.error(`❌ Error reading CSV: ${error.message}`);
-        producer.disconnect();
-        process.exit(1);
-      });
-  } catch (error) {
-    console.error(`❌ Error: ${error.message}`);
+async function sendTick(tick) {
+  await axios.post(API_URL, tick, {
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': API_KEY,
+    },
+    timeout: 15000,
+  });
+}
+
+async function run() {
+  const csvFiles = getCsvFiles(INPUT_PATH);
+  if (!csvFiles.length) {
+    console.error(`No CSV files found in ${INPUT_PATH}`);
     process.exit(1);
   }
-})();
+
+  let totalRows = 0;
+  let sent = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  console.log('Starting CSV playback to Ingestion API');
+  console.log(`Input: ${INPUT_PATH}`);
+  console.log(`API: ${API_URL}`);
+  console.log(`Delay: ${DELAY_MS} ms`);
+  console.log(`CSV files: ${csvFiles.length}`);
+
+  for (const filePath of csvFiles) {
+    const symbol = symbolFromFilename(filePath);
+    const rows = await loadRows(filePath);
+    console.log(`\nProcessing ${path.basename(filePath)} as symbol ${symbol} (${rows.length} rows)`);
+
+    for (const row of rows) {
+      totalRows += 1;
+      const tick = {
+        symbol,
+        price: parsePrice(row),
+        volume: parseVolume(row),
+        timestamp: parseTimestamp(row),
+      };
+
+      if (!tick.price || tick.price <= 0) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        await sendTick(tick);
+        sent += 1;
+        if (sent % 25 === 0) {
+          console.log(`Sent ${sent} ticks (latest ${tick.symbol} @ ${tick.price.toFixed(2)})`);
+        }
+      } catch (error) {
+        failed += 1;
+        const status = error.response?.status;
+        const detail = error.response?.data?.detail;
+        console.error(`Failed row ${totalRows} (${tick.symbol}): ${status || ''} ${detail || error.message}`);
+      }
+
+      if (DELAY_MS > 0) {
+        await wait(DELAY_MS);
+      }
+    }
+  }
+
+  console.log('\nDone');
+  console.log(`Total rows: ${totalRows}`);
+  console.log(`Sent: ${sent}`);
+  console.log(`Skipped: ${skipped}`);
+  console.log(`Failed: ${failed}`);
+}
+
+run().catch((error) => {
+  console.error(`Simulator failed: ${error.message}`);
+  process.exit(1);
+});

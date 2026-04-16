@@ -24,6 +24,8 @@ load_test_state = {
     "symbols": ["AAPL"],
     "started_at": None,
     "ticks_sent": 0,
+    "actual_tps": 0.0,
+    "last_cycle_sent": 0,
 }
 
 
@@ -35,29 +37,54 @@ class LoadTestStartRequest(BaseModel):
 async def load_test_loop(rate: int, symbols: list[str]):
     """Generate synthetic ticks continuously at `rate` ticks/sec."""
     local_prices = {symbol: random.uniform(120, 280) for symbol in symbols}
+    loop = asyncio.get_running_loop()
+    batch_size = 25
 
     while load_test_state["running"]:
-        loop_start = asyncio.get_running_loop().time()
+        cycle_start = loop.time()
+        remaining = rate
+        cycle_successes = 0
 
-        for _ in range(rate):
-            symbol = random.choice(symbols)
-            delta = random.uniform(-1.5, 1.5)
-            local_prices[symbol] = max(1.0, local_prices[symbol] + delta)
+        while remaining > 0 and load_test_state["running"]:
+            current_batch = min(batch_size, remaining)
+            batch_messages = []
 
-            tick_message = {
-                "symbol": symbol,
-                "price": round(local_prices[symbol], 2),
-                "volume": random.randint(500, 12000),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            for _ in range(current_batch):
+                symbol = random.choice(symbols)
+                delta = random.uniform(-1.5, 1.5)
+                local_prices[symbol] = max(1.0, local_prices[symbol] + delta)
+                batch_messages.append(
+                    {
+                        "symbol": symbol,
+                        "price": round(local_prices[symbol], 2),
+                        "volume": random.randint(500, 12000),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
 
-            success = await kafka_producer.send_message(Config.KAFKA_TOPIC, tick_message)
-            if success:
+            results = await asyncio.gather(
+                *[
+                    kafka_producer.send_message(Config.KAFKA_TOPIC, message)
+                    for message in batch_messages
+                ]
+            )
+            successes = sum(1 for result in results if result)
+            cycle_successes += successes
+            for _ in range(successes):
                 metrics.record_message()
-                load_test_state["ticks_sent"] += 1
 
-        elapsed = asyncio.get_running_loop().time() - loop_start
-        await asyncio.sleep(max(0.0, 1.0 - elapsed))
+            remaining -= current_batch
+
+        load_test_state["ticks_sent"] += cycle_successes
+        load_test_state["last_cycle_sent"] = cycle_successes
+
+        elapsed = loop.time() - cycle_start
+        sleep_for = max(0.0, 1.0 - elapsed)
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
+
+        effective_window = max(loop.time() - cycle_start, 0.001)
+        load_test_state["actual_tps"] = round(cycle_successes / effective_window, 2)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -209,6 +236,7 @@ async def start_load_test(request: LoadTestStartRequest):
             "rate": load_test_state["rate"],
             "symbols": load_test_state["symbols"],
             "ticks_sent": load_test_state["ticks_sent"],
+            "actual_tps": load_test_state["actual_tps"],
         }
 
     load_test_state["running"] = True
@@ -216,6 +244,8 @@ async def start_load_test(request: LoadTestStartRequest):
     load_test_state["symbols"] = symbols
     load_test_state["started_at"] = datetime.now(timezone.utc).isoformat()
     load_test_state["ticks_sent"] = 0
+    load_test_state["actual_tps"] = 0.0
+    load_test_state["last_cycle_sent"] = 0
 
     load_test_task = asyncio.create_task(load_test_loop(request.rate, symbols))
     logger.info(f"Load test started at {request.rate} ticks/sec for symbols: {symbols}")
@@ -260,6 +290,8 @@ async def load_test_status():
         "symbols": load_test_state["symbols"],
         "started_at": load_test_state["started_at"],
         "ticks_sent": load_test_state["ticks_sent"],
+        "actual_tps": load_test_state["actual_tps"],
+        "last_cycle_sent": load_test_state["last_cycle_sent"],
     }
 
 if __name__ == "__main__":

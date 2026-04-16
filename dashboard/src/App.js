@@ -17,6 +17,15 @@ const CHART_COLORS = {
   queueDepth: "#ff9f4a",
   prediction: "#76f3a8",
   workers: "#ff6b6b",
+  price: "#007cbf",
+};
+
+const COMPANY_LABELS = {
+  AAPL: "Apple",
+  GOLD: "Gold",
+  BOD: "Botswana Diamonds",
+  ENGBW: "Engen Botswana",
+  FNBB: "First National Bank Botswana",
 };
 
 function formatTime(value) {
@@ -164,6 +173,7 @@ function App() {
     firebase: 0,
   });
   const [demoLoadRunning, setDemoLoadRunning] = useState(false);
+  const [selectedCompanySymbol, setSelectedCompanySymbol] = useState("AAPL");
 
   const demoTimerRef = useRef(null);
   const previousPredictionRef = useRef(0);
@@ -261,6 +271,56 @@ function App() {
       .slice(0, 25);
   }, [decisionEvents, metrics.worker_count, scalingEvents]);
 
+  const availableSymbols = useMemo(() => {
+    const symbols = new Set(ticks.map((tick) => String(tick.symbol || "").toUpperCase()).filter(Boolean));
+
+    ["AAPL", "GOLD", "BOD", "ENGBW", "FNBB"].forEach((symbol) => symbols.add(symbol));
+
+    return [...symbols].sort((left, right) => {
+      const leftLabel = COMPANY_LABELS[left] || left;
+      const rightLabel = COMPANY_LABELS[right] || right;
+      return leftLabel.localeCompare(rightLabel);
+    });
+  }, [ticks]);
+
+  const selectedCompanyPoints = useMemo(() => {
+    const symbol = selectedCompanySymbol.toUpperCase();
+
+    const points = ticks
+      .filter((tick) => String(tick.symbol || "").toUpperCase() === symbol)
+      .sort((left, right) => parseTimestamp(left.processed_at) - parseTimestamp(right.processed_at))
+      .slice(-HISTORY_LIMIT)
+      .map((tick) => ({
+        timestamp: parseTimestamp(tick.processed_at),
+        value: toNumber(tick.price),
+      }))
+      .filter((point) => point.value > 0);
+
+    return points;
+  }, [selectedCompanySymbol, ticks]);
+
+  const selectedCompanyMovement = useMemo(() => {
+    const points = selectedCompanyPoints;
+    if (points.length < 2) {
+      return {
+        latestPrice: points.at(-1)?.value ?? 0,
+        delta: 0,
+        deltaPercent: 0,
+      };
+    }
+
+    const first = points[0].value;
+    const latest = points.at(-1)?.value ?? 0;
+    const delta = latest - first;
+    const deltaPercent = first > 0 ? (delta / first) * 100 : 0;
+
+    return {
+      latestPrice: latest,
+      delta,
+      deltaPercent,
+    };
+  }, [selectedCompanyPoints]);
+
   const tableRows = useMemo(() => {
     const normalizedFilter = symbolFilter.trim().toLowerCase();
     const filtered = ticks.filter((tick) => {
@@ -294,6 +354,16 @@ function App() {
 
     return sorted.slice(0, TABLE_LIMIT);
   }, [showOnlyAnomalies, sortDirection, sortKey, symbolFilter, ticks]);
+
+  useEffect(() => {
+    if (!availableSymbols.length) {
+      return;
+    }
+
+    if (!availableSymbols.includes(selectedCompanySymbol)) {
+      setSelectedCompanySymbol(availableSymbols[0]);
+    }
+  }, [availableSymbols, selectedCompanySymbol]);
 
   function appendDecisionEvent(type, message) {
     const newEvent = {
@@ -349,7 +419,7 @@ function App() {
         },
         body: JSON.stringify({
           rate: 100,
-          symbols: ["AAPL", "GOLD", "TSLA"],
+          symbols: ["AAPL", "GOLD", "BOD", "ENGBW", "FNBB"],
         }),
       });
 
@@ -555,6 +625,28 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
+    const refreshIngestionMetrics = async () => {
+      try {
+        const response = await fetch("http://localhost:8000/metrics", {
+          cache: "no-store",
+        });
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const payload = await response.json();
+        const ingestionTickRate = toNumber(payload.tickRatePerSecond, 0);
+        if (!cancelled && ingestionTickRate > 0) {
+          setMetrics((prev) => ({
+            ...prev,
+            tick_rate: Math.max(toNumber(prev.tick_rate, 0), ingestionTickRate),
+          }));
+        }
+      } catch {
+        // Ignore transient polling failures.
+      }
+    };
+
     const refreshLoadTestStatus = async () => {
       try {
         const response = await fetch("http://localhost:8000/api/load-test/status", {
@@ -567,17 +659,27 @@ function App() {
         const payload = await response.json();
         if (!cancelled) {
           setDemoLoadRunning(Boolean(payload.running));
+          const actualTps = toNumber(payload.actual_tps, 0);
+          if (actualTps > 0) {
+            setMetrics((prev) => ({
+              ...prev,
+              tick_rate: Math.max(toNumber(prev.tick_rate, 0), actualTps),
+            }));
+          }
         }
       } catch {
         // Keep current UI state if status endpoint is temporarily unreachable.
       }
     };
 
+    refreshIngestionMetrics();
     refreshLoadTestStatus();
+    const metricsIntervalId = setInterval(refreshIngestionMetrics, 3000);
     const intervalId = setInterval(refreshLoadTestStatus, 3000);
 
     return () => {
       cancelled = true;
+      clearInterval(metricsIntervalId);
       clearInterval(intervalId);
     };
   }, []);
@@ -799,6 +901,42 @@ function App() {
           title="Worker Count Trend"
           points={chartSeries.workerCount}
           color={CHART_COLORS.workers}
+          unit=""
+        />
+      </section>
+
+      <section className="panel company-movement-panel">
+        <div className="company-movement-header">
+          <h3>Company Price Movement</h3>
+          <label className="company-picker">
+            <span>Company</span>
+            <select
+              value={selectedCompanySymbol}
+              onChange={(event) => setSelectedCompanySymbol(event.target.value)}
+            >
+              {availableSymbols.map((symbol) => (
+                <option key={symbol} value={symbol}>
+                  {COMPANY_LABELS[symbol] || symbol} ({symbol})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="company-movement-stats">
+          <p>
+            Latest: <strong>${selectedCompanyMovement.latestPrice.toFixed(2)}</strong>
+          </p>
+          <p className={selectedCompanyMovement.delta >= 0 ? "movement-up" : "movement-down"}>
+            Movement: {selectedCompanyMovement.delta >= 0 ? "+" : ""}
+            {selectedCompanyMovement.delta.toFixed(2)} ({selectedCompanyMovement.deltaPercent.toFixed(2)}%)
+          </p>
+        </div>
+
+        <SparklineCard
+          title={`${COMPANY_LABELS[selectedCompanySymbol] || selectedCompanySymbol} (${selectedCompanySymbol})`}
+          points={selectedCompanyPoints}
+          color={CHART_COLORS.price}
           unit=""
         />
       </section>
