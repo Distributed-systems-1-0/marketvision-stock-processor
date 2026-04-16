@@ -1,6 +1,16 @@
 {
-  "name": "marketvision-worker",
+  "name": "worker",
   "version": "1.0.0",
   "main": "consumer.js",
-  "dependencies": {}
+  "scripts": {
+    "start": "node consumer.js",
+    "dev": "nodemon consumer.js"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "firebase-admin": "^11.10.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
 }
