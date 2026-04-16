@@ -4,7 +4,8 @@
   "main": "consumer.js",
   "scripts": {
     "start": "node consumer.js",
-    "dev": "nodemon consumer.js"
+    "dev": "nodemon consumer.js",
+    "mock": "node test-mock.js"
   },
   "dependencies": {
     "kafkajs": "^2.2.4",
