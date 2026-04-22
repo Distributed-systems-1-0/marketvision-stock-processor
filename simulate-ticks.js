@@ -8,12 +8,14 @@ const INPUT_PATH = args[0] || './data';
 const API_URL = args[1] || process.env.INGEST_API_URL || 'http://localhost:8000/ingest';
 const API_KEY = args[2] || process.env.API_KEY || 'test-api-key-123';
 const DELAY_MS = Number(args[3] || 100);
+const LOOP_MODE = args.includes('--loop') || args.includes('-l');
 
 if (args.includes('--help') || args.includes('-h')) {
-  console.log('Usage: node simulate-ticks.js [input_path] [api_url] [api_key] [delay_ms]');
+  console.log('Usage: node simulate-ticks.js [input_path] [api_url] [api_key] [delay_ms] [--loop]');
   console.log('Examples:');
   console.log('  node simulate-ticks.js');
   console.log('  node simulate-ticks.js ./data http://localhost:8000/ingest test-api-key-123 100');
+  console.log('  node simulate-ticks.js ./data http://localhost:8000/ingest test-api-key-123 20 --loop');
   process.exit(0);
 }
 
@@ -26,38 +28,65 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseNumeric(value) {
+  if (value === undefined || value === null) {
+    return NaN;
+  }
+  const cleaned = String(value).replace(/,/g, '').trim();
+  return Number.parseFloat(cleaned);
+}
+
 function parsePrice(row) {
   return (
-    Number.parseFloat(row.Close) ||
-    Number.parseFloat(row.close) ||
-    Number.parseFloat(row.Price) ||
-    Number.parseFloat(row.price) ||
-    Number.parseFloat(row.Last) ||
-    Number.parseFloat(row.last) ||
+    parseNumeric(row.Close) ||
+    parseNumeric(row.close) ||
+    parseNumeric(row.Price) ||
+    parseNumeric(row.price) ||
+    parseNumeric(row.Last) ||
+    parseNumeric(row.last) ||
     0
   );
 }
 
 function parseVolume(row) {
   return (
-    Number.parseInt(row.Volume, 10) ||
-    Number.parseInt(row.volume, 10) ||
-    Number.parseInt(row.Qty, 10) ||
-    Number.parseInt(row.qty, 10) ||
+    Number.parseInt(String(row.Volume || '').replace(/,/g, ''), 10) ||
+    Number.parseInt(String(row.volume || '').replace(/,/g, ''), 10) ||
+    Number.parseInt(String(row.Qty || '').replace(/,/g, ''), 10) ||
+    Number.parseInt(String(row.qty || '').replace(/,/g, ''), 10) ||
     1000
   );
 }
 
 function parseTimestamp(row) {
-  return (
+  const raw =
     row.Date ||
     row.date ||
     row.Timestamp ||
     row.timestamp ||
     row.Datetime ||
-    row.datetime ||
-    new Date().toISOString()
-  );
+    row.datetime;
+
+  if (!raw) {
+    return new Date().toISOString();
+  }
+
+  const value = String(raw).trim();
+
+  const usDate = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (usDate) {
+    const month = usDate[1].padStart(2, '0');
+    const day = usDate[2].padStart(2, '0');
+    const year = usDate[3];
+    return `${year}-${month}-${day}T00:00:00.000Z`;
+  }
+
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString();
+  }
+
+  return new Date().toISOString();
 }
 
 function getCsvFiles(inputPath) {
@@ -124,41 +153,52 @@ async function run() {
   console.log(`Delay: ${DELAY_MS} ms`);
   console.log(`CSV files: ${csvFiles.length}`);
 
-  for (const filePath of csvFiles) {
-    const symbol = symbolFromFilename(filePath);
-    const rows = await loadRows(filePath);
-    console.log(`\nProcessing ${path.basename(filePath)} as symbol ${symbol} (${rows.length} rows)`);
+  let cycle = 0;
 
-    for (const row of rows) {
-      totalRows += 1;
-      const tick = {
-        symbol,
-        price: parsePrice(row),
-        volume: parseVolume(row),
-        timestamp: parseTimestamp(row),
-      };
+  while (true) {
+    cycle += 1;
+    console.log(`\nCycle ${cycle}${LOOP_MODE ? ' (continuous mode)' : ''}`);
 
-      if (!tick.price || tick.price <= 0) {
-        skipped += 1;
-        continue;
-      }
+    for (const filePath of csvFiles) {
+      const symbol = symbolFromFilename(filePath);
+      const rows = await loadRows(filePath);
+      console.log(`Processing ${path.basename(filePath)} as symbol ${symbol} (${rows.length} rows)`);
 
-      try {
-        await sendTick(tick);
-        sent += 1;
-        if (sent % 25 === 0) {
-          console.log(`Sent ${sent} ticks (latest ${tick.symbol} @ ${tick.price.toFixed(2)})`);
+      for (const row of rows) {
+        totalRows += 1;
+        const tick = {
+          symbol,
+          price: parsePrice(row),
+          volume: parseVolume(row),
+          timestamp: parseTimestamp(row),
+        };
+
+        if (!tick.price || tick.price <= 0) {
+          skipped += 1;
+          continue;
         }
-      } catch (error) {
-        failed += 1;
-        const status = error.response?.status;
-        const detail = error.response?.data?.detail;
-        console.error(`Failed row ${totalRows} (${tick.symbol}): ${status || ''} ${detail || error.message}`);
-      }
 
-      if (DELAY_MS > 0) {
-        await wait(DELAY_MS);
+        try {
+          await sendTick(tick);
+          sent += 1;
+          if (sent % 25 === 0) {
+            console.log(`Sent ${sent} ticks (latest ${tick.symbol} @ ${tick.price.toFixed(2)})`);
+          }
+        } catch (error) {
+          failed += 1;
+          const status = error.response?.status;
+          const detail = error.response?.data?.detail;
+          console.error(`Failed row ${totalRows} (${tick.symbol}): ${status || ''} ${detail || error.message}`);
+        }
+
+        if (DELAY_MS > 0) {
+          await wait(DELAY_MS);
+        }
       }
+    }
+
+    if (!LOOP_MODE) {
+      break;
     }
   }
 
