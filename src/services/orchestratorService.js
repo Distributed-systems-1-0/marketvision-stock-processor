@@ -45,7 +45,7 @@ async function getAIPrediction(metrics) {
     const response = await axios.post(AI_API_URL, {
       timestamp: metrics.timestamp,
       queue_depth: metrics.queueDepth,
-      tick_rate: metrics.tickRate,
+      tick_rate: Math.round(metrics.tickRate || 0),
       worker_count: metrics.activeWorkerCount,
       avg_worker_cpu: metrics.avgCpuPercentage,
     });

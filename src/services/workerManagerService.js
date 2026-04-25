@@ -1,5 +1,7 @@
 const Docker = require('dockerode');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const docker = new Docker(); // Connects to Docker on your Ubuntu/WSL2 system
 
 class WorkerManager {
@@ -15,18 +17,36 @@ class WorkerManager {
     async spawnWorker(workerId) {
         try {
             console.log(`Spawning worker: ${workerId}...`);
+            const firebaseHostPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH
+                ? path.resolve(process.env.FIREBASE_SERVICE_ACCOUNT_PATH)
+                : null;
+            const firebaseContainerPath = '/secrets/firebase-service-account.json';
+            const env = [
+                `WORKER_ID=${workerId}`,
+                `KAFKA_BROKER=kafka:29092`,
+                `KAFKA_BROKERS=kafka:29092`,
+                `PORT=3002`
+            ];
+
+            if (firebaseHostPath && fs.existsSync(firebaseHostPath)) {
+                env.push(`FIREBASE_SERVICE_ACCOUNT_PATH=${firebaseContainerPath}`);
+            }
+
+            const hostConfig = {
+                NetworkMode: 'docker_ingestion-network',
+                PortBindings: { '3002/tcp': [{ HostPort: '0' }] }
+            };
+
+            if (firebaseHostPath && fs.existsSync(firebaseHostPath)) {
+                hostConfig.Binds = [`${firebaseHostPath}:${firebaseContainerPath}:ro`];
+            }
+
             const container = await docker.createContainer({
                 Image: this.workerImage,
                 name: workerId,
-                Env: [
-                    `WORKER_ID=${workerId}`,
-                    `KAFKA_BROKER=${process.env.KAFKA_BROKER || 'localhost:9092'}`,
-                    `PORT=3002`
-                ],
+                Env: env,
                 ExposedPorts: { '3002/tcp': {} },
-                HostConfig: {
-                    PortBindings: { '3002/tcp': [{ HostPort: '0' }] } // Auto-assigns host port
-                }
+                HostConfig: hostConfig
             });
 
             await container.start();
